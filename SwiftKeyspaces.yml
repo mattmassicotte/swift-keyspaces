@@ -1,0 +1,134 @@
+Parameters:
+
+  BucketName:
+    Type: String
+    Description: S3 bucket name that hosts Lambda content
+
+  Architecture:
+    Type: String
+    Description: Executable architecture for the Lambda function
+    AllowedValues:
+      - x86_64
+      - arm64
+
+Outputs:
+  InvokeURL:
+    Description: "HTTP API URL"
+    Value: !Sub "https://${API}.execute-api.${AWS::Region}.amazonaws.com/${APIStage}/keyspaces"
+
+Resources:
+
+  Database:
+    Type: AWS::Cassandra::Keyspace
+    Properties:
+      KeyspaceName: swift_keyspaces_test
+
+  Table:
+    Type: AWS::Cassandra::Table
+    Properties:
+      KeyspaceName: !Ref Database
+      TableName: test_table
+      RegularColumns:
+        - ColumnName: value
+          ColumnType: ascii
+      PartitionKeyColumns:
+        - ColumnName: key
+          ColumnType: ascii
+
+  LambdaLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      Description: "Keyspaces Certificates"
+      Content:
+         S3Bucket: !Ref BucketName
+         S3Key: SwiftKeyspacesLayer.zip
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: "SwiftKeyspacesFunction Lambda Role"
+      RoleName: "SwiftKeyspacesFunctionRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaRole"
+      Policies:
+        - PolicyName: KeyspacesRead
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "cassandra:Select"
+                Resource:
+                  - !Sub "arn:aws:cassandra:*:${AWS::AccountId}:/keyspace/${Table}/table/${Table}"
+                  - !Sub "arn:aws:cassandra:*:${AWS::AccountId}:/keyspace/system/table/*"
+      
+  Lambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Architectures:
+        - !Ref Architecture
+      Code:
+        S3Bucket: !Ref BucketName
+        S3Key: SwiftKeyspacesFunction.zip
+      Description: "Swift function that sits between API Gateway and Keyspaces"
+      Environment:
+        Variables:
+          KEYSPACES_USER: user
+          KEYSPACES_PASS: pass
+          KEYSPACES_NAME: !Ref Database
+      FunctionName: SwiftKeyspaces
+      Handler: SwiftKeyspaces
+      Layers:
+        - !Ref LambdaLayer
+      PackageType: Zip
+      Role: !Sub "${LambdaRole.Arn}"
+      Runtime: "provided.al2"
+
+  LambdaAPIPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Sub "${Lambda.Arn}"
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${API}/*/*/*"
+
+  API:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Description: "SwiftKeyspaces HTTP API"
+      Name: SwiftKeyspaces
+      ProtocolType: HTTP
+      Version: 1
+
+  APIIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref API
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "${Lambda.Arn}"
+      PayloadFormatVersion: "2.0"
+
+  APIRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref API
+      RouteKey: "GET /keyspaces"
+      Target: !Sub "integrations/${APIIntegration}"
+
+  APIStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref API
+      AutoDeploy: true
+      Description: "API Test Deployment"
+      StageName: Test
