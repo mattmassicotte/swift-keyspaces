@@ -10,4 +10,4 @@ mkdir -p "$target"
 cp ".build/release/$executable" "$target/"
 cd "$target"
 ln -s "$executable" "bootstrap"
-zip --symlinks lambda.zip *
+zip --symlinks SwiftKeyspacesFunction.zip *
